@@ -8,107 +8,86 @@
     [clojure.set :as set])
   #?(:clj (:import (clojure.lang PersistentQueue))))
 
-(defn parse [input]
-  (map #(re-seq #"\b[A-Z]\b" %) (str/split-lines input)))
-
-(defn collect-deps [deps]
-  (map (fn [[k v]] [k (into #{} (map first v))])
-       (group-by second deps)))
-
-(defn solve-1 []
-  (let [tasks-remaining (map str (seq "ABCDEFGHIJKLMNOPQRSTUVWXYZ"))
-        dep-graph (->> (parse input)
-                       collect-deps
-                       (into {}))]
-    (->> (loop [acc []
-                tasks-remaining tasks-remaining
-                completed-tasks #{}]
-           (if (empty? tasks-remaining)
-             acc
-             (let [has-remaining-deps #(some identity (set/difference (dep-graph %) completed-tasks))
-                   [unripe-tasks rem] (split-with has-remaining-deps tasks-remaining)
-                   next-task (first rem)]
-               (recur (conj acc next-task)
-                      (concat unripe-tasks (rest rem))
-                      (conj completed-tasks next-task)))))
-         (apply str))))
-
-(defn has-remaining-deps [dep-graph completed-tasks task]
-  (some identity (set/difference (dep-graph task) completed-tasks)))
-
-(defn unblocked-tasks [is-blocked? tasks-remaining]
-  (lazy-seq
-    (let [[left [next-task & right]] (split-with is-blocked? tasks-remaining)
-          remaining (concat left right)]
-      (when next-task
-        (cons [next-task remaining] (unblocked-tasks is-blocked? remaining))))))
-
-(defn empty-queue []
-  #?(:clj  PersistentQueue/EMPTY
-     :cljs (.-EMPTY PersistentQueue)))
+(def parse (memoize
+             (fn [input] (map #(vec (re-seq #"\b[A-Z]\b" %)) (str/split-lines input)))))
 
 (defn split-set-with [pred s]
   (let [taken (take-while pred s)]
     [taken (set/difference s (set taken))]))
 
-(defn pop-n [n q]
-  (nth (iterate pop q) n))
+(defn map-vals [pred m]
+  (reduce (fn [m k] (update m k pred))
+          m
+          (keys m)))
+
+(defn blocks-graph [deps]
+  (map-vals #(apply sorted-set (map second %)) (group-by first deps)))
+(def mem-blocks-graph (memoize blocks-graph))
+
+(defn blocked-by-graph [deps]
+  (map-vals #(apply hash-set (map first %)) (group-by second deps)))
+(def mem-blocked-by-graph (memoize blocked-by-graph))
+
+(defn resolve-deps [blocked-by blocks completed-tasks]
+  (reduce (fn [[blocked-by uncovered-tasks] t]
+            (let [partially-uncovered (blocks t)
+                  new-blocked-by (reduce
+                                   (fn [bb covered-task]
+                                     (update bb covered-task #(disj % t)))
+                                   blocked-by partially-uncovered)
+                  fully-uncovered (filter #(= 0 (count (new-blocked-by %))) partially-uncovered)]
+              [new-blocked-by (concat uncovered-tasks fully-uncovered)]))
+          [blocked-by '()] completed-tasks))
+
+; Create an "open-nodes" sorted-set
+; Get rid of "completed-tasks" set
+; Start on the lexicographically first open node
+; Go to the nodes it blocked. Remove each edge from the blocked-by graph.
+; Check the new blocked-by graph to see which nodes are open and add them
+; to the open-nodes set.
+; Take the first node from open-nodes and repeat.
+(defn solve-1 []
+  (let [all-tasks '("A" "B" "C" "D" "E" "F" "G" "H" "I" "J" "K" "L" "M" "N" "O" "P" "Q" "R" "S" "T" "U" "V" "W" "X" "Y" "Z")
+        deps (parse input)
+        x-blocks-y (mem-blocks-graph deps)]
+    (loop [acc []
+           x-blocked-by-y (mem-blocked-by-graph deps)
+           open-tasks (apply sorted-set (remove x-blocked-by-y all-tasks))]
+      (if (empty? open-tasks)
+        (apply str acc)
+        (let [current-task (first open-tasks)
+              uncovered (x-blocks-y current-task)
+              blocked-by (reduce (fn [deps t]
+                                   (update deps t #(disj % current-task)))
+                                 x-blocked-by-y uncovered)
+              newly-open (remove #(some identity (blocked-by %)) uncovered)]
+          (recur (conj acc current-task)
+                 blocked-by
+                 (-> open-tasks
+                     (disj current-task)
+                     (#(apply conj % newly-open)))))))))
 
 (defn solve-2 []
   (let [all-tasks '("A" "B" "C" "D" "E" "F" "G" "H" "I" "J" "K" "L" "M" "N" "O" "P" "Q" "R" "S" "T" "U" "V" "W" "X" "Y" "Z")
-        finished-state (into #{} all-tasks)
         task-length (zipmap all-tasks (range 61 87))
-        dep-graph (->> (parse input)
-                       collect-deps
-                       (into {}))]
-    (loop [tasks-remaining all-tasks
-           completed-tasks #{}
-           in-progress (sorted-set)
-           backlog (empty-queue)
-           current-time 0]
-      ;(do
-      ;  (println "tasks-remaining" tasks-remaining)
-      ;  (println "completed" completed-tasks)
-      ;  (println "working" in-progress)
-      ;  (println "backlog" (seq backlog) backlog)
-      ;  (when (pos? (count backlog)) (println "FOUND---------------------"))
-      ;  (println "current time" current-time))
-
-      (if (= completed-tasks finished-state)
-        0
-        (let [finished? #(= current-time (first %))
-              [newly-completed still-working] (split-set-with finished? in-progress)
-              all-completed (apply conj completed-tasks (map second newly-completed))
-              ;_ (do
-              ;    (println "newly-completed" newly-completed)
-              ;    (println "completed" all-completed))
-              free-workers (- 5 (count still-working))
-              ready-tasks (unblocked-tasks (partial has-remaining-deps
-                                                    dep-graph
-                                                    all-completed)
-                                           tasks-remaining)
-              new-remaining (or (second (last ready-tasks)) tasks-remaining)
-              ready-task-names (map first ready-tasks)
-              temp-backlog (apply conj backlog ready-task-names)
-              to-start (take free-workers temp-backlog)
-              ;_ (do
-              ;    (println "to-start" to-start))
-              leftover-backlog (pop-n free-workers temp-backlog)
-              ;_ (do
-              ;    (println "leftover-backlog" (seq leftover-backlog)))
-              tasks-with-finish-time (map (fn [t]
-                                            [(+ (task-length t) current-time) t])
-                                          to-start)
-              ;_ (do
-              ;    (println "tasks-with-finish-time" tasks-with-finish-time))
-              new-in-progress (apply conj still-working tasks-with-finish-time)]
-          (if (= all-completed finished-state)
-            current-time
-            (recur new-remaining
-                   all-completed
-                   new-in-progress
-                   leftover-backlog
-                   (first (first new-in-progress)))))))))
+        deps (parse input)
+        x-blocks-y (mem-blocks-graph deps)
+        x-blocked-by-y (mem-blocked-by-graph deps)
+        open-tasks (remove x-blocked-by-y all-tasks)]
+    (loop [working (apply sorted-set (zipmap (map task-length open-tasks) open-tasks))
+           blocked-by x-blocked-by-y
+           current-time (first (first working))]
+      (let [[c-t still-working] (split-set-with #(= current-time (first %)) working)
+            completed-tasks (map second c-t)
+            [remaining-blocked-by uncovered-tasks] (resolve-deps blocked-by x-blocks-y completed-tasks)
+            new-tasks (map (fn [t] [(+ (task-length t) current-time) t])
+                           uncovered-tasks)
+            new-working (apply conj still-working new-tasks)]
+        (if (empty? new-working)
+          current-time
+          (recur new-working
+                 remaining-blocked-by
+                 (first (first new-working))))))))
 
 (deftest part-1
   (is (= (str answer-1)
